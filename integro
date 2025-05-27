@@ -1,0 +1,61 @@
+@* Pages/Operator.razor *@
+@page "/operator"
+@inject IMqttService MqttService
+@implements IDisposable
+
+<h3>Operator Control</h3>
+
+<div class="row">
+    <div class="col-md-6">
+        <h4>Commands</h4>
+        
+        <CommandButton ButtonText="Start" 
+                      ButtonClass="btn-success"
+                      Command="start"
+                      Payload="@(new { command = "start", device = "motor1" })" />
+        
+        <CommandButton ButtonText="Stop" 
+                      ButtonClass="btn-danger"
+                      Command="stop"
+                      Payload="@(new { command = "stop", device = "motor1" })" />
+        
+        <CommandButton ButtonText="Reset" 
+                      ButtonClass="btn-warning"
+                      Command="reset"
+                      Payload="@(new { command = "reset", device = "motor1" })" />
+    </div>
+    
+    <div class="col-md-6">
+        <h4>Device State</h4>
+        <div class="alert alert-info">
+            @deviceState
+        </div>
+    </div>
+</div>
+
+@code {
+    private string deviceState = "Waiting for state...";
+    
+    protected override async Task OnInitializedAsync()
+    {
+        await MqttService.SubscribeAsync("devicestate");
+        MqttService.MessageReceived += OnMessageReceived;
+    }
+    
+    private void OnMessageReceived(object sender, MqttMessageEventArgs e)
+    {
+        if (e.Topic == "devicestate")
+        {
+            InvokeAsync(() =>
+            {
+                deviceState = e.Payload;
+                StateHasChanged();
+            });
+        }
+    }
+    
+    public void Dispose()
+    {
+        MqttService.MessageReceived -= OnMessageReceived;
+    }
+}
