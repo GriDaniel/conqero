@@ -1,0 +1,20 @@
+@* Components/CommandButton.razor *@
+@inject IMqttService MqttService
+
+<button class="btn @ButtonClass" 
+        @onclick="SendCommand" 
+        disabled="@(!MqttService.IsConnected)">
+    @ButtonText
+</button>
+
+@code {
+    [Parameter] public string ButtonText { get; set; }
+    [Parameter] public string ButtonClass { get; set; } = "btn-primary";
+    [Parameter] public string Command { get; set; }
+    [Parameter] public object Payload { get; set; }
+    
+    private async Task SendCommand()
+    {
+        await MqttService.PublishAsync("executecommand", Payload ?? new { command = Command });
+    }
+}
