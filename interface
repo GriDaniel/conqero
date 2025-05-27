@@ -1,0 +1,91 @@
+public interface IMqttService
+{
+    Task ConnectAsync();
+    Task PublishAsync(string topic, object payload);
+    Task SubscribeAsync(string topic);
+    Task UnsubscribeAsync(string topic);
+    bool IsConnected { get; }
+    event EventHandler<MqttMessageEventArgs> MessageReceived;
+}
+
+public class MqttService : IMqttService
+{
+    private readonly MqttClient _mqttClient;
+    private readonly ILogger<MqttService> _logger;
+    
+    // Public event for Blazor components
+    public event EventHandler<MqttMessageEventArgs> MessageReceived;
+    
+    public bool IsConnected => _mqttClient.IsConnected;
+    
+    public MqttService(MqttClient mqttClient, ILogger<MqttService> logger)
+    {
+        _mqttClient = mqttClient;
+        _logger = logger;
+        
+        // Hook into the base class's public MessageReceived event!
+        SetupMessageHandling();
+    }
+    
+    private void SetupMessageHandling()
+    {
+        // Subscribe to the base class's public event
+        _mqttClient.MessageReceived += OnBaseClientMessageReceived;
+    }
+    
+    private void OnBaseClientMessageReceived(object sender, EventArgs e)
+    {
+        // Convert from base class event args to our event args
+        // Adjust this based on your actual MessageReceived type
+        if (e is MqttApplicationMessageReceivedEventArgs mqttArgs)
+        {
+            var topic = mqttArgs.ApplicationMessage.Topic;
+            var payload = Encoding.UTF8.GetString(mqttArgs.ApplicationMessage.Payload ?? Array.Empty<byte>());
+            
+            _logger.LogInformation($"Message received - Topic: {topic}, Payload: {payload}");
+            
+            // Raise our event for Blazor components
+            MessageReceived?.Invoke(this, new MqttMessageEventArgs
+            {
+                Topic = topic,
+                Payload = payload,
+                Timestamp = DateTime.Now
+            });
+        }
+    }
+    
+    public async Task ConnectAsync()
+    {
+        if (!IsConnected)
+        {
+            await _mqttClient.ConnectAsync();
+            _logger.LogInformation("MQTT Connected");
+        }
+    }
+    
+    public async Task PublishAsync(string topic, object payload)
+    {
+        var json = payload is string str ? str : JsonSerializer.Serialize(payload);
+        await _mqttClient.PublishAsync(topic, json);
+        _logger.LogInformation($"Published to {topic}: {json}");
+    }
+    
+    public async Task SubscribeAsync(string topic)
+    {
+        await _mqttClient.SubscribeAsync(topic);
+        _logger.LogInformation($"Subscribed to: {topic}");
+    }
+    
+    public async Task UnsubscribeAsync(string topic)
+    {
+        await _mqttClient.UnsubscribeAsync(topic);
+        _logger.LogInformation($"Unsubscribed from: {topic}");
+    }
+}
+
+public class MqttMessageEventArgs : EventArgs
+{
+    public string Topic { get; set; }
+    public string Payload { get; set; }
+    public DateTime Timestamp { get; set; }
+}
