@@ -1,0 +1,72 @@
+public abstract class MqttPageBase : ComponentBase, IDisposable
+{
+    [Inject] protected IMqttService Mqtt { get; set; }
+    [Inject] protected ILogger<MqttPageBase> Logger { get; set; }
+    
+    private readonly List<IDisposable> _subscriptions = new();
+    private readonly Dictionary<string, Action<string>> _messageHandlers = new();
+    
+    // Define subscriptions needed for this page
+    protected abstract Dictionary<string, int> GetPageSubscriptions(); // topic -> qos
+    
+    protected override async Task OnInitializedAsync()
+    {
+        var pageName = GetType().Name;
+        Logger.LogInformation("[{PageName}] Initializing MQTT subscriptions", pageName);
+        
+        // Ensure connected
+        await Mqtt.EnsureConnectedAsync();
+        
+        // Auto-subscribe to all defined topics
+        var subscriptions = GetPageSubscriptions();
+        foreach (var sub in subscriptions)
+        {
+            var subscription = Mqtt.RegisterPageSubscription(
+                this,
+                sub.Key,
+                sub.Value,
+                payload => HandleMessage(sub.Key, payload)
+            );
+            
+            _subscriptions.Add(subscription);
+            Logger.LogInformation("[{PageName}] Subscribed to '{Topic}' with QoS {QoS}", 
+                pageName, sub.Key, sub.Value);
+        }
+        
+        await OnMqttInitializedAsync();
+    }
+    
+    protected virtual Task OnMqttInitializedAsync() => Task.CompletedTask;
+    
+    protected void RegisterMessageHandler(string topic, Action<string> handler)
+    {
+        _messageHandlers[topic] = handler;
+    }
+    
+    private void HandleMessage(string topic, string payload)
+    {
+        Logger.LogDebug("[{PageName}] Received message on '{Topic}': {Payload}", 
+            GetType().Name, topic, payload);
+            
+        if (_messageHandlers.TryGetValue(topic, out var handler))
+        {
+            InvokeAsync(() =>
+            {
+                handler(payload);
+                StateHasChanged();
+            });
+        }
+    }
+    
+    public void Dispose()
+    {
+        var pageName = GetType().Name;
+        Logger.LogInformation("[{PageName}] Disposing {Count} subscriptions", 
+            pageName, _subscriptions.Count);
+            
+        foreach (var sub in _subscriptions)
+        {
+            sub.Dispose();
+        }
+    }
+}
