@@ -1,0 +1,47 @@
+@inject IMqttService Mqtt
+@inject ILogger<MqttButton> Logger
+
+<button class="btn @CssClass" @onclick="HandleClick" disabled="@_isProcessing">
+    @if (_isProcessing)
+    {
+        <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+    }
+    @Text
+</button>
+
+@code {
+    [Parameter] public string DeviceId { get; set; }
+    [Parameter] public string Command { get; set; }
+    [Parameter] public string Text { get; set; }
+    [Parameter] public string CssClass { get; set; } = "btn-primary";
+    [Parameter] public string Topic { get; set; } = "executecommand";
+    [Parameter] public bool RetainFlag { get; set; } = false;
+    [Parameter] public int Qos { get; set; } = 1;
+    [Parameter] public Func<string, string, string> PayloadBuilder { get; set; }
+    
+    private bool _isProcessing = false;
+    
+    private async Task HandleClick()
+    {
+        _isProcessing = true;
+        StateHasChanged();
+        
+        try
+        {
+            // Use custom payload builder or default format
+            var payload = PayloadBuilder != null 
+                ? PayloadBuilder(DeviceId, Command)
+                : $"{DeviceId}:{Command}:{DateTime.UtcNow:O}";
+                
+            Logger.LogInformation("[MqttButton] Publishing - Device: {DeviceId}, Command: {Command}, Topic: {Topic}", 
+                DeviceId, Command, Topic);
+                
+            await Mqtt.PublishAsync(Topic, payload, RetainFlag, Qos);
+        }
+        finally
+        {
+            _isProcessing = false;
+            StateHasChanged();
+        }
+    }
+}
