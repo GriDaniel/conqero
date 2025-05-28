@@ -1,0 +1,100 @@
+@page "/devicecontrol"
+@inherits MqttPageBase
+
+<h3>Device Control Panel</h3>
+
+<div class="row mb-3">
+    <div class="col-md-6">
+        <h4>Machine Operations</h4>
+        <div class="btn-group-vertical w-100">
+            <MqttButton DeviceId="machine-001" 
+                       Command="START" 
+                       Text="Start Machine" 
+                       CssClass="btn-success" />
+                       
+            <MqttButton DeviceId="machine-001" 
+                       Command="STOP" 
+                       Text="Stop Machine" 
+                       CssClass="btn-danger" />
+                       
+            <MqttButton DeviceId="machine-001" 
+                       Command="RESET" 
+                       Text="Reset Machine" 
+                       CssClass="btn-warning" />
+        </div>
+    </div>
+    
+    <div class="col-md-6">
+        <h4>Temperature Control</h4>
+        <div class="btn-group-vertical w-100">
+            <MqttButton DeviceId="temp-sensor-001" 
+                       Command="SET_HIGH" 
+                       Text="Set High (80°C)" 
+                       Topic="temperature/commands"
+                       PayloadBuilder="@((id, cmd) => $"{{\"device\":\"{id}\",\"temp\":80,\"unit\":\"C\"}}")" />
+                       
+            <MqttButton DeviceId="temp-sensor-001" 
+                       Command="SET_LOW" 
+                       Text="Set Low (20°C)" 
+                       Topic="temperature/commands"
+                       PayloadBuilder="@((id, cmd) => $"{{\"device\":\"{id}\",\"temp\":20,\"unit\":\"C\"}}")" />
+        </div>
+    </div>
+</div>
+
+<div class="mt-4">
+    <h4>Device Status</h4>
+    <div class="alert alert-info">
+        <strong>Machine Status:</strong> @_machineStatus<br/>
+        <strong>Temperature:</strong> @_temperatureStatus
+    </div>
+</div>
+
+<div class="mt-3">
+    <h5>Raw Messages</h5>
+    <div class="border p-2" style="height: 200px; overflow-y: auto;">
+        @foreach (var msg in _messages)
+        {
+            <div class="small">@msg</div>
+        }
+    </div>
+</div>
+
+@code {
+    private string _machineStatus = "Waiting for updates...";
+    private string _temperatureStatus = "No temperature data";
+    private List<string> _messages = new();
+    
+    protected override Dictionary<string, int> GetPageSubscriptions()
+    {
+        return new Dictionary<string, int>
+        {
+            { "devicestate", 1 },
+            { "temperature/status", 2 }
+        };
+    }
+    
+    protected override Task OnMqttInitializedAsync()
+    {
+        // Register handlers for each topic
+        RegisterMessageHandler("devicestate", payload =>
+        {
+            _machineStatus = $"{payload} at {DateTime.Now:HH:mm:ss}";
+            AddMessage($"[devicestate] {payload}");
+        });
+        
+        RegisterMessageHandler("temperature/status", payload =>
+        {
+            _temperatureStatus = payload;
+            AddMessage($"[temperature/status] {payload}");
+        });
+        
+        return Task.CompletedTask;
+    }
+    
+    private void AddMessage(string message)
+    {
+        _messages.Insert(0, $"{DateTime.Now:HH:mm:ss} - {message}");
+        if (_messages.Count > 20) _messages.RemoveAt(_messages.Count - 1);
+    }
+}
