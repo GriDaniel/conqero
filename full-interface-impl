@@ -1,13 +1,11 @@
 public interface IMqttService
 {
     bool IsConnected { get; }
-    Task ConnectAsync();
+    Task EnsureConnectedAsync();
     Task DisconnectAsync(bool cleanDisconnect = true);
     Task PublishAsync(string topic, string payload, bool retainFlag = true, int qos = 1);
-    Task SubscribeAsync(string topic, int qos = 1);
     Task PublishCommandAsync(string deviceId, string command);
-    IDisposable RegisterPage(object page);
-    void SubscribeToDeviceState(object page, Action<string> onMessage);
+    IDisposable RegisterPageSubscription(object page, string topic, int qos, Action<string> onMessage);
 }
 
 public class MqttService : IMqttService, IDisposable
@@ -15,7 +13,6 @@ public class MqttService : IMqttService, IDisposable
     private readonly MqttClient _client;
     private readonly ILogger<MqttService> _logger;
     private readonly ConcurrentDictionary<object, List<Action>> _pageCleanups = new();
-    private readonly ConcurrentDictionary<string, TopicType> _topicTypes = new();
     
     public bool IsConnected => _client.IsConnected;
     
@@ -23,213 +20,142 @@ public class MqttService : IMqttService, IDisposable
     {
         _logger = logger;
         
-        // Initialize with known topics
-        _topicTypes["devicestate"] = TopicType.Variable;
-        _topicTypes["executecommand"] = TopicType.Signal;
+        // Initialize with EMPTY subscriptions - all subscriptions managed per-page
+        var emptySubscriptions = new List<MqttSubscription>();
         
-        var subscriptions = new List<MqttSubscription>
-        {
-            new MqttSubscription("devicestate", TopicType.Variable, 1)
-        };
-        
-        _client = new MqttClient(logger, subscriptions);
+        _client = new MqttClient(logger, emptySubscriptions);
         _client.MessageReceived += OnMessageReceived;
         
-        _logger.LogInformation("[MqttService.Constructor] Service initialized with {Count} initial subscriptions", 
-            subscriptions.Count);
+        _logger.LogInformation("[MqttService.Constructor] Service initialized with no pre-configured subscriptions");
     }
     
-    public async Task ConnectAsync()
+    public async Task EnsureConnectedAsync()
     {
         if (IsConnected)
         {
-            _logger.LogInformation("[MqttService.ConnectAsync] Already connected, skipping connection");
+            _logger.LogDebug("[MqttService.EnsureConnectedAsync] Already connected");
             return;
         }
         
-        _logger.LogInformation("[MqttService.ConnectAsync] Initiating connection to MQTT broker");
+        _logger.LogInformation("[MqttService.EnsureConnectedAsync] Establishing connection to MQTT broker");
         
         try
         {
             await _client.ConnectAsync();
-            _logger.LogInformation("[MqttService.ConnectAsync] Successfully connected. IsConnected: {IsConnected}", 
-                IsConnected);
+            _logger.LogInformation("[MqttService.EnsureConnectedAsync] Connected successfully");
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "[MqttService.ConnectAsync] Connection failed");
+            _logger.LogError(ex, "[MqttService.EnsureConnectedAsync] Connection failed");
             throw;
         }
     }
     
     public async Task DisconnectAsync(bool cleanDisconnect = true)
     {
+        if (!IsConnected)
+        {
+            _logger.LogDebug("[MqttService.DisconnectAsync] Already disconnected");
+            return;
+        }
+        
         _logger.LogInformation("[MqttService.DisconnectAsync] Disconnecting with cleanDisconnect: {CleanDisconnect}", 
             cleanDisconnect);
             
-        try
-        {
-            await _client.DisconnectAsync(cleanDisconnect);
-            _logger.LogInformation("[MqttService.DisconnectAsync] Successfully disconnected");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "[MqttService.DisconnectAsync] Disconnect failed");
-            throw;
-        }
+        await _client.DisconnectAsync(cleanDisconnect);
     }
     
     public async Task PublishAsync(string topic, string payload, bool retainFlag = true, int qos = 1)
     {
-        _logger.LogInformation("[MqttService.PublishAsync] Publishing to topic '{Topic}' with QoS {QoS}, Retain: {Retain}, Payload: {Payload}", 
-            topic, qos, retainFlag, payload);
+        await EnsureConnectedAsync();
+        
+        _logger.LogInformation("[MqttService.PublishAsync] Publishing to '{Topic}' - QoS: {QoS}, Retain: {Retain}", 
+            topic, qos, retainFlag);
             
-        try
-        {
-            await _client.PublishAsync(topic, payload, retainFlag, qos);
-            _logger.LogDebug("[MqttService.PublishAsync] Successfully published to '{Topic}'", topic);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "[MqttService.PublishAsync] Failed to publish to topic '{Topic}'", topic);
-            throw;
-        }
-    }
-    
-    public async Task SubscribeAsync(string topic, int qos = 1)
-    {
-        _logger.LogInformation("[MqttService.SubscribeAsync] Subscribing to topic '{Topic}' with QoS {QoS}", 
-            topic, qos);
-            
-        try
-        {
-            // Note: Base class SubscribeAsync is async void, so we can't await it properly
-            _client.SubscribeAsync(topic, qos);
-            
-            // Give it a moment to complete since we can't await
-            await Task.Delay(100);
-            
-            _logger.LogInformation("[MqttService.SubscribeAsync] Subscription request sent for topic '{Topic}'", topic);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "[MqttService.SubscribeAsync] Failed to subscribe to topic '{Topic}'", topic);
-            throw;
-        }
+        await _client.PublishAsync(topic, payload, retainFlag, qos);
     }
     
     public async Task PublishCommandAsync(string deviceId, string command)
     {
         var payload = $"{deviceId}:{command}:{DateTime.UtcNow:O}";
-        _logger.LogInformation("[MqttService.PublishCommandAsync] Sending command '{Command}' to device '{DeviceId}'", 
+        _logger.LogInformation("[MqttService.PublishCommandAsync] Command '{Command}' for device '{DeviceId}'", 
             command, deviceId);
             
         await PublishAsync("executecommand", payload, false, 1);
     }
     
-    public IDisposable RegisterPage(object page)
+    public IDisposable RegisterPageSubscription(object page, string topic, int qos, Action<string> onMessage)
     {
         var pageName = page.GetType().Name;
-        _logger.LogInformation("[MqttService.RegisterPage] Registering page: {PageName}", pageName);
+        _logger.LogInformation("[MqttService.RegisterPageSubscription] {PageName} subscribing to '{Topic}' with QoS {QoS}", 
+            pageName, topic, qos);
         
+        // Ensure we have a cleanup list for this page
         _pageCleanups.TryAdd(page, new List<Action>());
         
-        return new DisposableAction(() =>
-        {
-            if (_pageCleanups.TryRemove(page, out var cleanups))
-            {
-                _logger.LogInformation("[MqttService.RegisterPage] Disposing {Count} subscriptions for page: {PageName}", 
-                    cleanups.Count, pageName);
-                    
-                foreach (var cleanup in cleanups)
-                {
-                    cleanup.Invoke();
-                }
-            }
-        });
-    }
-    
-    public void SubscribeToDeviceState(object page, Action<string> onMessage)
-    {
-        var pageName = page.GetType().Name;
+        // Subscribe to the topic
+        _client.SubscribeAsync(topic, qos);
         
-        if (!_pageCleanups.ContainsKey(page))
-        {
-            _logger.LogError("[MqttService.SubscribeToDeviceState] Page {PageName} not registered", pageName);
-            throw new InvalidOperationException($"Page {pageName} not registered. Call RegisterPage first.");
-        }
-        
+        // Create message handler
         EventHandler handler = (sender, args) =>
         {
-            if (args is MqttSubscription msg && msg.Topic == "devicestate")
+            if (args is MqttSubscription msg && msg.Topic == topic)
             {
-                _logger.LogDebug("[MqttService.SubscribeToDeviceState] Device state received for {PageName}: {Payload}", 
-                    pageName, msg.Payload);
+                _logger.LogDebug("[MqttService.MessageHandler] {PageName} received message on '{Topic}': {Payload}", 
+                    pageName, topic, msg.Payload);
                 onMessage(msg.Payload);
             }
         };
         
         _client.MessageReceived += handler;
         
-        _pageCleanups[page].Add(() =>
+        // Add cleanup action
+        Action cleanup = () =>
         {
             _client.MessageReceived -= handler;
-            _logger.LogDebug("[MqttService.SubscribeToDeviceState] Unsubscribed {PageName} from device state", pageName);
-        });
+            _logger.LogInformation("[MqttService.Cleanup] {PageName} unsubscribed from '{Topic}'", pageName, topic);
+        };
         
-        _logger.LogInformation("[MqttService.SubscribeToDeviceState] Page {PageName} subscribed to device state", pageName);
+        _pageCleanups[page].Add(cleanup);
+        
+        // Return disposable that removes just this subscription
+        return new DisposableAction(() =>
+        {
+            cleanup();
+            _pageCleanups[page]?.Remove(cleanup);
+            
+            // If no more subscriptions for this page, remove it
+            if (_pageCleanups.TryGetValue(page, out var list) && list.Count == 0)
+            {
+                _pageCleanups.TryRemove(page, out _);
+            }
+        });
     }
     
     private void OnMessageReceived(object sender, MqttSubscription e)
     {
-        _logger.LogInformation("[MqttService.OnMessageReceived] Message received - Topic: '{Topic}', Type: {Type}, QoS: {QoS}, Payload: {Payload}", 
-            e.Topic, e.TopicType, e.Qos, e.Payload);
-            
-        // Log additional details based on topic type
-        switch (e.TopicType)
-        {
-            case TopicType.Variable:
-                _logger.LogDebug("[MqttService.OnMessageReceived] Variable topic - likely state update");
-                break;
-            case TopicType.Signal:
-                _logger.LogDebug("[MqttService.OnMessageReceived] Signal topic - likely command acknowledgment");
-                break;
-            case TopicType.None:
-                _logger.LogWarning("[MqttService.OnMessageReceived] Topic type is None for topic '{Topic}'", e.Topic);
-                break;
-        }
+        _logger.LogInformation("[MqttService.OnMessageReceived] Topic: '{Topic}', Payload: {Payload}", 
+            e.Topic, e.Payload);
     }
     
     public void Dispose()
     {
-        _logger.LogInformation("[MqttService.Dispose] Disposing MqttService");
+        _logger.LogInformation("[MqttService.Dispose] Cleaning up all subscriptions and disconnecting");
         
-        // Clean up all page subscriptions
-        foreach (var page in _pageCleanups.Keys.ToList())
+        // Clean up all subscriptions
+        foreach (var kvp in _pageCleanups)
         {
-            if (_pageCleanups.TryRemove(page, out var cleanups))
+            foreach (var cleanup in kvp.Value)
             {
-                foreach (var cleanup in cleanups)
-                {
-                    cleanup.Invoke();
-                }
+                cleanup();
             }
         }
+        _pageCleanups.Clear();
         
-        // Disconnect from broker
+        // Disconnect
         if (IsConnected)
         {
-            _logger.LogInformation("[MqttService.Dispose] Disconnecting from broker");
             _client?.DisconnectAsync(true).Wait(TimeSpan.FromSeconds(5));
         }
-        
-        _logger.LogInformation("[MqttService.Dispose] Disposal complete");
     }
-}
-
-public class DisposableAction : IDisposable
-{
-    private readonly Action _action;
-    public DisposableAction(Action action) => _action = action;
-    public void Dispose() => _action?.Invoke();
 }
