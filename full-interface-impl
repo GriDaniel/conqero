@@ -84,53 +84,53 @@ public class MqttService : IMqttService, IDisposable
         await PublishAsync("executecommand", payload, false, 1);
     }
     
-    public IDisposable RegisterPageSubscription(object page, string topic, int qos, Action<string> onMessage)
+  public IDisposable RegisterPageSubscription(object page, string topic, int qos, Action<string> onMessage)
+{
+    var pageName = page.GetType().Name;
+    _logger.LogInformation("[MqttService.RegisterPageSubscription] {PageName} subscribing to '{Topic}' with QoS {QoS}", 
+        pageName, topic, qos);
+    
+    // Ensure we have a cleanup list for this page
+    _pageCleanups.TryAdd(page, new List<Action>());
+    
+    // Subscribe to the topic
+    _client.SubscribeAsync(topic, qos);
+    
+    // Create message handler - FIX: Match the actual event signature
+    EventHandler<MqttSubscription> handler = (sender, msg) =>
     {
-        var pageName = page.GetType().Name;
-        _logger.LogInformation("[MqttService.RegisterPageSubscription] {PageName} subscribing to '{Topic}' with QoS {QoS}", 
-            pageName, topic, qos);
-        
-        // Ensure we have a cleanup list for this page
-        _pageCleanups.TryAdd(page, new List<Action>());
-        
-        // Subscribe to the topic
-        _client.SubscribeAsync(topic, qos);
-        
-        // Create message handler
-        EventHandler handler = (sender, args) =>
+        if (msg.Topic == topic)
         {
-            if (args is MqttSubscription msg && msg.Topic == topic)
-            {
-                _logger.LogDebug("[MqttService.MessageHandler] {PageName} received message on '{Topic}': {Payload}", 
-                    pageName, topic, msg.Payload);
-                onMessage(msg.Payload);
-            }
-        };
+            _logger.LogDebug("[MqttService.MessageHandler] {PageName} received message on '{Topic}': {Payload}", 
+                pageName, topic, msg.Payload);
+            onMessage(msg.Payload);
+        }
+    };
+    
+    _client.MessageReceived += handler;
+    
+    // Add cleanup action
+    Action cleanup = () =>
+    {
+        _client.MessageReceived -= handler;
+        _logger.LogInformation("[MqttService.Cleanup] {PageName} unsubscribed from '{Topic}'", pageName, topic);
+    };
+    
+    _pageCleanups[page].Add(cleanup);
+    
+    // Return disposable that removes just this subscription
+    return new DisposableAction(() =>
+    {
+        cleanup();
+        _pageCleanups[page]?.Remove(cleanup);
         
-        _client.MessageReceived += handler;
-        
-        // Add cleanup action
-        Action cleanup = () =>
+        // If no more subscriptions for this page, remove it
+        if (_pageCleanups.TryGetValue(page, out var list) && list.Count == 0)
         {
-            _client.MessageReceived -= handler;
-            _logger.LogInformation("[MqttService.Cleanup] {PageName} unsubscribed from '{Topic}'", pageName, topic);
-        };
-        
-        _pageCleanups[page].Add(cleanup);
-        
-        // Return disposable that removes just this subscription
-        return new DisposableAction(() =>
-        {
-            cleanup();
-            _pageCleanups[page]?.Remove(cleanup);
-            
-            // If no more subscriptions for this page, remove it
-            if (_pageCleanups.TryGetValue(page, out var list) && list.Count == 0)
-            {
-                _pageCleanups.TryRemove(page, out _);
-            }
-        });
-    }
+            _pageCleanups.TryRemove(page, out _);
+        }
+    });
+}
     
     private void OnMessageReceived(object sender, MqttSubscription e)
     {
